@@ -32,12 +32,12 @@ def pdf_to_txt(uploaded_pdf) -> str:
                 all_text += text + "\n\n"
     return all_text
 
-def parse_raw_blocks(text: str, limit: int = 20):
+def parse_raw_blocks(text: str, limit: int = 150):
     text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n)", "", text, flags=re.I)
     raw_qs = re.split(r"\n?\s*\d+\.\s+", text)
     return raw_qs[1:limit+1]
 
-def llm_clean_questions(raw_questions, limit=20):
+def llm_clean_questions(raw_questions, limit=150):
     prompt = f"""
 You are a Quiz Formatter.
 Format {limit} messy bilingual exam questions into JSON.
