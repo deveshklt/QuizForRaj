@@ -184,12 +184,12 @@ with tab2:
 
         # ✅ Page numbers at bottom
         with col2:
-            page_buttons = st.columns(total_pages)
+            # Corrected line to fix the error
+            page_buttons = st.columns([1] * total_pages)
             for i in range(total_pages):
                 if page_buttons[i].button(str(i+1), key=f"page{i}"):
                     st.session_state.page = i
                     st.rerun()
-
         # ---------------- Submit Section ----------------
         if st.session_state.page == total_pages - 1:
             if st.button("Submit Quiz"):
