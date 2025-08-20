@@ -128,7 +128,7 @@ with tab1:
         with st.spinner("Processing PDF and generating quiz JSON..."):
             raw_text = pdf_to_txt(uploaded_pdf)
             raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
-            quiz_data = quiz_data = llm_clean_questions_batched(raw_blocks, limit=quiz_limit, batch_size=10)
+            quiz_data = llm_clean_questions_incremental(raw_blocks, output_json_path="quiz_temp.json")
 
 
             # Ensure all quiz fields are strings
