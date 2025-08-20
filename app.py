@@ -19,9 +19,27 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # --------------------- Utilities ---------------------
+
 def extract_json(llm_output: str):
-    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", llm_output.strip(), flags=re.MULTILINE)
-    return json.loads(cleaned)
+    """Extract the first valid JSON array/object from LLM output safely."""
+    cleaned = llm_output.strip()
+
+    # Remove ```json ... ``` fences if present
+    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+
+    # Try to find the first JSON array or object
+    match = re.search(r"(\[.*\]|\{.*\})", cleaned, re.DOTALL)
+    if not match:
+        raise ValueError("No JSON found in LLM output")
+
+    json_str = match.group(1)
+
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # Last resort: try to fix common issues like trailing commas
+        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)
+        return json.loads(fixed)
 
 def pdf_to_txt(uploaded_pdf) -> str:
     all_text = ""
