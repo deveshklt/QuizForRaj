@@ -103,6 +103,7 @@ with tab1:
         st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
 
 # --------------------- USER PANEL ---------------------
+# --------------------- USER PANEL ---------------------
 with tab2:
     st.header("🖊️ Take Quiz")
     quiz_docs = db.collection("quizzes").order_by("created_at", direction=firestore.Query.DESCENDING).stream()
@@ -110,6 +111,13 @@ with tab2:
 
     if quizzes_list:
         quiz_selection = st.selectbox("Select a Quiz", options=[q[1] for q in quizzes_list])
+
+        # ✅ Reset page if quiz changes
+        if "last_quiz" not in st.session_state or st.session_state.last_quiz != quiz_selection:
+            st.session_state.page = 0
+            st.session_state.responses = {}
+            st.session_state.last_quiz = quiz_selection
+
         quiz_id = [q[0] for q in quizzes_list if q[1] == quiz_selection][0]
 
         quiz_doc = db.collection("quizzes").document(quiz_id).get().to_dict()
@@ -136,28 +144,31 @@ with tab2:
             choice = st.radio(f"Answer for Q{idx}", options=opts, key=f"q{idx}")
             st.session_state.responses[idx] = choice
 
-        col1, col2, col3 = st.columns([1,2,1])
+        # ---------------- Page Navigation ----------------
+        col1, col2, col3 = st.columns([1, 6, 1])
         with col1:
             if st.session_state.page > 0 and st.button("⬅️ Previous"):
                 st.session_state.page -= 1
-                if hasattr(st, "rerun"):
-                    st.rerun()
-                else:
-                    st.experimental_rerun()
+                st.rerun()
         with col3:
             if st.session_state.page < total_pages - 1 and st.button("Next ➡️"):
                 st.session_state.page += 1
-                if hasattr(st, "rerun"):
-                    st.rerun()
-                else:
-                    st.experimental_rerun()
+                st.rerun()
 
+        # ✅ Page numbers at bottom
+        with col2:
+            page_buttons = st.columns(total_pages)
+            for i in range(total_pages):
+                if page_buttons[i].button(str(i+1), key=f"page{i}"):
+                    st.session_state.page = i
+                    st.rerun()
+
+        # ---------------- Submit Section ----------------
         if st.session_state.page == total_pages - 1:
             if st.button("Submit Quiz"):
                 data_rows = []
-                correct, wrong, unattempted = 0,0,0
+                correct, wrong, unattempted = 0, 0, 0
 
-                # Convert responses for Firestore: string keys + single-letter values
                 firestore_responses = {str(k): (v[:1].upper() if v else "E")
                                        for k,v in st.session_state.responses.items()}
 
@@ -169,10 +180,10 @@ with tab2:
                     if sel_letter == "E":
                         unattempted += 1
                     elif sel_letter == key_letter:
-                        correct +=1
+                        correct += 1
                         is_correct = True
                     else:
-                        wrong +=1
+                        wrong += 1
                         is_correct = False
 
                     data_rows.append({
@@ -187,7 +198,6 @@ with tab2:
                 st.success(f"✅ Correct: {correct} | ❌ Wrong: {wrong} | 💤 Unattempted: {unattempted} | 📊 Total Marks: {marks:.2f}")
                 st.dataframe(df, use_container_width=True)
 
-                # Save sanitized responses in Firestore
                 user_id = str(uuid.uuid4())
                 db.collection("responses").document(f"{quiz_id}_{user_id}").set({
                     "quiz_id": str(quiz_id),
