@@ -95,25 +95,18 @@ st.set_page_config(page_title="Quiz Platform", layout="wide")
 tab1, tab2 = st.tabs(["Admin Panel", "Take Quiz"])
 
 # --------------------- ADMIN PANEL ---------------------
+# --------------------- ADMIN PANEL ---------------------
 with tab1:
     st.header("📝 Admin Panel - Create Quiz")
     uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
     uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
-    # ✅ Add download button
-    st.download_button(
-    label="📥 Download Quiz JSON",
-    data=json.dumps(quiz_json, ensure_ascii=False, indent=2),
-    file_name=f"quiz_{quiz_id}.json",
-    mime="application/json"
-)
     quiz_limit = st.number_input("Number of Questions to Extract", min_value=1, max_value=150, value=10)
 
     if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
         with st.spinner("Processing PDF and generating quiz JSON..."):
             raw_text = pdf_to_txt(uploaded_pdf)
             raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
-            quiz_data = quiz_data = llm_clean_questions_batched(raw_blocks, limit=quiz_limit, batch_size=10)
-
+            quiz_data = llm_clean_questions_batched(raw_blocks, limit=quiz_limit, batch_size=10)
 
             # Ensure all quiz fields are strings
             for q in quiz_data:
@@ -126,15 +119,34 @@ with tab1:
             answer_key = {str(int(row["qno"])): str(row["answer"]).strip().upper()[:1]
                           for _, row in answer_key_df.iterrows()}
 
-            # Save to Firestore
+            # Generate quiz ID
             quiz_id = str(uuid.uuid4())
+
+            # Prepare JSON for download and Firestore
+            quiz_json = {
+                "title": f"Quiz {quiz_id}",
+                "questions": quiz_data,
+                "answer_key": answer_key
+            }
+
+            # ✅ Download button
+            st.download_button(
+                label="📥 Download Quiz JSON",
+                data=json.dumps(quiz_json, ensure_ascii=False, indent=2),
+                file_name=f"quiz_{quiz_id}.json",
+                mime="application/json"
+            )
+
+            # Save to Firestore
             db.collection("quizzes").document(quiz_id).set({
                 "title": f"Quiz {quiz_id}",
                 "questions": quiz_data,
                 "answer_key": answer_key,
                 "created_at": firestore.SERVER_TIMESTAMP
             })
+
         st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
+
 
 # --------------------- USER PANEL ---------------------
 with tab2:
