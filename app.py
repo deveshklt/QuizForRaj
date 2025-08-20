@@ -1,17 +1,15 @@
-# quiz_firestore_app_final.py
+# quiz_firestore_app_txt.py
 import os
 import re
 import json
 import uuid
 import pandas as pd
 import streamlit as st
-import pdfplumber
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, firestore
 
 # --------------------- Firebase Initialization ---------------------
-# Load Firebase credentials from Streamlit secrets
 if not firebase_admin._apps:
     cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
@@ -23,14 +21,8 @@ def extract_json(llm_output: str):
     cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", llm_output.strip(), flags=re.MULTILINE)
     return json.loads(cleaned)
 
-def pdf_to_txt(uploaded_pdf) -> str:
-    all_text = ""
-    with pdfplumber.open(uploaded_pdf) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                all_text += text + "\n\n"
-    return all_text
+def txt_to_str(uploaded_txt) -> str:
+    return uploaded_txt.read().decode("utf-8")
 
 def parse_raw_blocks(text: str, limit: int = 150):
     text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n)", "", text, flags=re.I)
@@ -40,7 +32,7 @@ def parse_raw_blocks(text: str, limit: int = 150):
 def llm_clean_questions(raw_questions, limit=150):
     prompt = f"""
 You are a {limit} Questions Quiz Formatter.
-Number of Questions should me as much as mentioned. It is very necessary.
+Number of Questions must be exactly {limit}.
 You will be given messy exam questions (Hindi + English) with options. 
 There can be a question like which iss to be answered using reaading a paragraph or steps for more then one question.
 Clean them and output a JSON list of objects like this:
@@ -49,7 +41,7 @@ Clean them and output a JSON list of objects like this:
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
-it is mendotary to create json of {limit} questions.
+It is mandatory to create JSON of {limit} questions.
 Keep bilingual versions if available. 
 Ensure options are in correct A/B/C/D/E order. 
 Only return JSON. 
@@ -71,13 +63,13 @@ tab1, tab2 = st.tabs(["Admin Panel", "Take Quiz"])
 # --------------------- ADMIN PANEL ---------------------
 with tab1:
     st.header("📝 Admin Panel - Create Quiz")
-    uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
+    uploaded_txt = st.file_uploader("Upload Quiz TXT", type=["txt"])
     uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
     quiz_limit = st.number_input("Number of Questions to Extract", min_value=1, max_value=150, value=10)
 
-    if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
-        with st.spinner("Processing PDF and generating quiz JSON..."):
-            raw_text = pdf_to_txt(uploaded_pdf)
+    if st.button("Create Quiz") and uploaded_txt and uploaded_csv:
+        with st.spinner("Processing TXT and generating quiz JSON..."):
+            raw_text = txt_to_str(uploaded_txt)
             raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
             quiz_data = llm_clean_questions(raw_blocks, limit=quiz_limit)
 
@@ -111,7 +103,6 @@ with tab2:
     if quizzes_list:
         quiz_selection = st.selectbox("Select a Quiz", options=[q[1] for q in quizzes_list])
 
-        # ✅ Reset page if quiz changes
         if "last_quiz" not in st.session_state or st.session_state.last_quiz != quiz_selection:
             st.session_state.page = 0
             st.session_state.responses = {}
@@ -153,8 +144,6 @@ with tab2:
             if st.session_state.page < total_pages - 1 and st.button("Next ➡️"):
                 st.session_state.page += 1
                 st.rerun()
-
-        # ✅ Page numbers at bottom
         with col2:
             page_buttons = st.columns(total_pages)
             for i in range(total_pages):
