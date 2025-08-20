@@ -52,8 +52,8 @@ def safe_extract_json(llm_output: str):
         return json.loads(json_str)
     except json.JSONDecodeError:
         # Fix common issues
-        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)   # remove trailing commas
-        fixed = re.sub(r"[\x00-\x1f]+", "", fixed)       # remove control chars
+        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)    # remove trailing commas
+        fixed = re.sub(r"[\x00-\x1f]+", "", fixed)         # remove control chars
         return json.loads(fixed)
 
 
@@ -207,10 +207,11 @@ with tab2:
         # ✅ Page numbers at bottom
         with col2:
             page_buttons = st.columns(total_pages)
-            for i in range(total_pages):
-                if page_buttons[i].button(str(i+1), key=f"page{i}"):
+            for i, col in enumerate(page_buttons):
+                if col.button(str(i+1), key=f"page{i}"):
                     st.session_state.page = i
                     st.rerun()
+
 
         # ---------------- Submit Section ----------------
         if st.session_state.page == total_pages - 1:
