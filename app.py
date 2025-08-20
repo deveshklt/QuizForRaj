@@ -1,4 +1,4 @@
-# quiz_firestore_app_txt.py
+# quiz_firestore_app_final.py
 import os
 import re
 import json
@@ -21,7 +21,7 @@ def extract_json(llm_output: str):
     cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", llm_output.strip(), flags=re.MULTILINE)
     return json.loads(cleaned)
 
-def txt_to_str(uploaded_txt) -> str:
+def txt_to_text(uploaded_txt) -> str:
     return uploaded_txt.read().decode("utf-8")
 
 def parse_raw_blocks(text: str, limit: int = 150):
@@ -29,32 +29,37 @@ def parse_raw_blocks(text: str, limit: int = 150):
     raw_qs = re.split(r"\n?\s*\d+\.\s+", text)
     return raw_qs[1:limit+1]
 
-def llm_clean_questions(raw_questions, limit=150):
-    prompt = f"""
-You are a {limit} Questions Quiz Formatter.
-Number of Questions must be exactly {limit}.
-You will be given messy exam questions (Hindi + English) with options. 
-There can be a question like which iss to be answered using reaading a paragraph or steps for more then one question.
+def llm_clean_questions(raw_questions, limit=150, batch_size=30):
+    """Process raw questions in batches to avoid token limits."""
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    all_cleaned = []
+
+    for i in range(0, min(limit, len(raw_questions)), batch_size):
+        batch = raw_questions[i:i+batch_size]
+        prompt = f"""
+You are a Quiz Formatter.
+
+You will be given messy exam questions (Hindi + English) with options.
 Clean them and output a JSON list of objects like this:
 {{
  "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
-It is mandatory to create JSON of {limit} questions.
-Keep bilingual versions if available. 
-Ensure options are in correct A/B/C/D/E order. 
-Only return JSON. 
+Ensure you create exactly {len(batch)} JSON objects.
+Keep bilingual versions if available.
 Questions:
-{raw_questions}
+{batch}
 """
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    resp = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0,
-    )
-    return extract_json(resp.choices[0].message.content.strip())
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}],
+            temperature=0,
+        )
+        batch_json = extract_json(resp.choices[0].message.content.strip())
+        all_cleaned.extend(batch_json)
+
+    return all_cleaned[:limit]
 
 # --------------------- Streamlit Tabs ---------------------
 st.set_page_config(page_title="Quiz Platform", layout="wide")
@@ -69,7 +74,7 @@ with tab1:
 
     if st.button("Create Quiz") and uploaded_txt and uploaded_csv:
         with st.spinner("Processing TXT and generating quiz JSON..."):
-            raw_text = txt_to_str(uploaded_txt)
+            raw_text = txt_to_text(uploaded_txt)
             raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
             quiz_data = llm_clean_questions(raw_blocks, limit=quiz_limit)
 
@@ -109,7 +114,6 @@ with tab2:
             st.session_state.last_quiz = quiz_selection
 
         quiz_id = [q[0] for q in quizzes_list if q[1] == quiz_selection][0]
-
         quiz_doc = db.collection("quizzes").document(quiz_id).get().to_dict()
         quiz_data = quiz_doc["questions"]
         answer_key = quiz_doc["answer_key"]
@@ -134,7 +138,7 @@ with tab2:
             choice = st.radio(f"Answer for Q{idx}", options=opts, key=f"q{idx}")
             st.session_state.responses[idx] = choice
 
-        # ---------------- Page Navigation ----------------
+        # Page Navigation
         col1, col2, col3 = st.columns([1, 6, 1])
         with col1:
             if st.session_state.page > 0 and st.button("⬅️ Previous"):
@@ -144,6 +148,8 @@ with tab2:
             if st.session_state.page < total_pages - 1 and st.button("Next ➡️"):
                 st.session_state.page += 1
                 st.rerun()
+
+        # Page numbers at bottom
         with col2:
             page_buttons = st.columns(total_pages)
             for i in range(total_pages):
@@ -151,7 +157,7 @@ with tab2:
                     st.session_state.page = i
                     st.rerun()
 
-        # ---------------- Submit Section ----------------
+        # Submit Section
         if st.session_state.page == total_pages - 1:
             if st.button("Submit Quiz"):
                 data_rows = []
