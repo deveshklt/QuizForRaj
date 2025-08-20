@@ -57,37 +57,59 @@ def safe_extract_json(llm_output: str):
         return json.loads(fixed)
 
 
-def llm_clean_questions_batched(raw_questions, limit=150, batch_size=10):
-    """Process questions in smaller batches for gpt-4o-mini."""
+def llm_clean_questions_incremental(raw_questions, output_json_path="quiz_temp.json"):
+    """Process each question individually, append to JSON file."""
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     all_questions = []
 
-    for i in range(0, min(limit, len(raw_questions)), batch_size):
-        batch = raw_questions[i:i+batch_size]
+    # If file exists, load existing questions
+    if os.path.exists(output_json_path):
+        with open(output_json_path, "r", encoding="utf-8") as f:
+            try:
+                all_questions = json.load(f)
+            except:
+                all_questions = []
+
+    start_idx = len(all_questions)
+    total_questions = len(raw_questions)
+
+    for i in range(start_idx, total_questions):
+        q_text = raw_questions[i]
         prompt = f"""
 You are a Quiz Formatter.
-You will be given messy exam questions (Hindi + English) with options. 
-Clean them and output a JSON array of exactly {len(batch)} objects like this:
+You will be given a messy exam question (Hindi + English) with options. 
+Clean it and output a JSON array with **1 object** like this:
+
 {{
  "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
-Ensure bilingual text if available, options in A/B/C/D/E order, and valid JSON only.
-Questions:
-{batch}
-"""
 
+Question:
+{q_text}
+"""
         resp = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
 
-        batch_json = safe_extract_json(resp.choices[0].message.content.strip())
-        all_questions.extend(batch_json)
+        try:
+            cleaned_q = safe_extract_json(resp.choices[0].message.content.strip())
+            all_questions.extend(cleaned_q)
+        except Exception as e:
+            st.error(f"Error processing question {i+1}: {e}")
+            continue
 
-    return all_questions[:limit]
+        # Save progress to JSON file after each question
+        with open(output_json_path, "w", encoding="utf-8") as f:
+            json.dump(all_questions, f, ensure_ascii=False, indent=2)
+
+        st.info(f"✅ Processed question {i+1}/{total_questions}")
+
+    st.success(f"All {total_questions} questions processed and saved to {output_json_path}")
+    return all_questions
 
 
 
