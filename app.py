@@ -39,8 +39,8 @@ def parse_raw_blocks(text: str, limit: int = 150):
 
 def llm_clean_questions(raw_questions, limit=150):
     prompt = f"""
-You are a Quiz Formatter.
-
+You are a {limit} Questions Quiz Formatter.
+Number of Questions should me as much as mentioned. It is very necessary.
 You will be given messy exam questions (Hindi + English) with options. 
 There can be a question like which iss to be answered using reaading a paragraph or steps for more then one question.
 Clean them and output a JSON list of objects like this:
@@ -102,7 +102,6 @@ with tab1:
             })
         st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
 
-# --------------------- USER PANEL ---------------------
 # --------------------- USER PANEL ---------------------
 with tab2:
     st.header("🖊️ Take Quiz")
