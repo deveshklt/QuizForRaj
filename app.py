@@ -136,7 +136,10 @@ with tab2:
         with col1:
             if st.session_state.page > 0 and st.button("⬅️ Previous"):
                 st.session_state.page -= 1
-                st.experimental_rerun()
+                if hasattr(st, "rerun"):
+                    st.rerun()
+                else:
+                    st.experimental_rerun()
         with col3:
             if st.session_state.page < total_pages - 1 and st.button("Next ➡️"):
                 st.session_state.page += 1
