@@ -20,27 +20,6 @@ db = firestore.client()
 
 # --------------------- Utilities ---------------------
 
-def extract_json(llm_output: str):
-    """Extract the first valid JSON array/object from LLM output safely."""
-    cleaned = llm_output.strip()
-
-    # Remove ```json ... ``` fences if present
-    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
-
-    # Try to find the first JSON array or object
-    match = re.search(r"(\[.*\]|\{.*\})", cleaned, re.DOTALL)
-    if not match:
-        raise ValueError("No JSON found in LLM output")
-
-    json_str = match.group(1)
-
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError as e:
-        # Last resort: try to fix common issues like trailing commas
-        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)
-        return json.loads(fixed)
-
 def pdf_to_txt(uploaded_pdf) -> str:
     all_text = ""
     with pdfplumber.open(uploaded_pdf) as pdf:
@@ -55,32 +34,60 @@ def parse_raw_blocks(text: str, limit: int = 150):
     raw_qs = re.split(r"\n?\s*\d+\.\s+", text)
     return raw_qs[1:limit+1]
 
-def llm_clean_questions(raw_questions, limit=150):
-    prompt = f"""
-You are a {limit} Questions Quiz Formatter.
-Number of Questions should me as much as mentioned. It is very necessary.
+def safe_extract_json(llm_output: str):
+    """Try to extract valid JSON even if the LLM response is messy."""
+    cleaned = llm_output.strip()
+
+    # Remove code fences
+    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+
+    # Find JSON array
+    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+    if not match:
+        raise ValueError("No JSON found in LLM output")
+    json_str = match.group(0)
+
+    # Try normal parse first
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        # Fix common issues
+        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)   # remove trailing commas
+        fixed = re.sub(r"[\x00-\x1f]+", "", fixed)       # remove control chars
+        return json.loads(fixed)
+
+
+def llm_clean_questions_batched(raw_questions, limit=150, batch_size=30):
+    """Process questions in batches to avoid JSON length issues."""
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    all_questions = []
+
+    for i in range(0, min(limit, len(raw_questions)), batch_size):
+        batch = raw_questions[i:i+batch_size]
+        prompt = f"""
+You are a Quiz Formatter.
 You will be given messy exam questions (Hindi + English) with options. 
-There can be a question like which iss to be answered using reaading a paragraph or steps for more then one question.
-Clean them and output a JSON list of objects like this:
+Clean them and output a JSON array of exactly {len(batch)} objects like this:
 {{
  "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
-it is mendotary to create json of {limit} questions.
-Keep bilingual versions if available. 
-Ensure options are in correct A/B/C/D/E order. 
-Only return JSON. 
+Ensure bilingual text if available, options in A/B/C/D/E order, and valid JSON only.
 Questions:
-{raw_questions}
+{batch}
 """
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    resp = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=[{"role":"user","content":prompt}],
-        temperature=0,
-    )
-    return extract_json(resp.choices[0].message.content.strip())
+
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
+        batch_json = safe_extract_json(resp.choices[0].message.content.strip())
+        all_questions.extend(batch_json)
+
+    # Ensure exactly `limit` questions
+    return all_questions[:limit]
 
 # --------------------- Streamlit Tabs ---------------------
 st.set_page_config(page_title="Quiz Platform", layout="wide")
@@ -97,7 +104,8 @@ with tab1:
         with st.spinner("Processing PDF and generating quiz JSON..."):
             raw_text = pdf_to_txt(uploaded_pdf)
             raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
-            quiz_data = llm_clean_questions(raw_blocks, limit=quiz_limit)
+            quiz_data = quiz_data = llm_clean_questions_batched(raw_blocks, limit=quiz_limit, batch_size=30)
+
 
             # Ensure all quiz fields are strings
             for q in quiz_data:
