@@ -32,12 +32,12 @@ def pdf_to_txt(uploaded_pdf) -> str:
                 all_text += text + "\n\n"
     return all_text
 
-def parse_raw_blocks(text: str, limit: int = 10):
+def parse_raw_blocks(text: str, limit: int = 20):
     text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n)", "", text, flags=re.I)
     raw_qs = re.split(r"\n?\s*\d+\.\s+", text)
     return raw_qs[1:limit+1]
 
-def llm_clean_questions(raw_questions, limit=10):
+def llm_clean_questions(raw_questions, limit=20):
     prompt = f"""
 You are a Quiz Formatter.
 Format {limit} messy bilingual exam questions into JSON.
@@ -69,7 +69,7 @@ with tab1:
     st.header("📝 Admin Panel - Create Quiz")
     uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
     uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
-    quiz_limit = st.number_input("Number of Questions to Extract", min_value=1, max_value=100, value=10)
+    quiz_limit = st.number_input("Number of Questions to Extract", min_value=1, max_value=150, value=10)
 
     if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
         with st.spinner("Processing PDF and generating quiz JSON..."):
