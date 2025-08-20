@@ -52,8 +52,8 @@ def safe_extract_json(llm_output: str):
         return json.loads(json_str)
     except json.JSONDecodeError:
         # Fix common issues
-        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)    # remove trailing commas
-        fixed = re.sub(r"[\x00-\x1f]+", "", fixed)         # remove control chars
+        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)   # remove trailing commas
+        fixed = re.sub(r"[\x00-\x1f]+", "", fixed)       # remove control chars
         return json.loads(fixed)
 
 
@@ -72,50 +72,45 @@ def llm_clean_questions_incremental(raw_questions, output_json_path="quiz_temp.j
 
     start_idx = len(all_questions)
     total_questions = len(raw_questions)
-    
-    # Use a progress bar for better UX
-    progress_bar = st.progress(0)
 
     for i in range(start_idx, total_questions):
         q_text = raw_questions[i]
-        
-        # IMPROVED PROMPT
         prompt = f"""
-You are a Quiz Formatter. Your task is to extract a single quiz question from the provided raw text and format it as a JSON object.
-The raw text is a mix of Hindi and English. Your final output MUST be a JSON array containing a single object, with no other text, comments, or explanations.
-The JSON object must have the following keys: "question_hindi", "question_english", and "options". The "options" key must be an object with keys "A", "B", "C", "D", and "E".
+You are a Quiz Formatter.
+You will be given a messy exam question (Hindi + English) with options. 
+Clean it and output a JSON array with **1 object** like this:
 
-Raw Question Text:
+{{
+ "question_hindi": "...",
+ "question_english": "...",
+ "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
+}}
+
+Question:
 {q_text}
 """
-        try:
-            resp = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                response_format={"type": "json_object"} # Use this feature if supported by the model
-            )
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+        )
 
-            # NOTE: The safe_extract_json function is still necessary here
+        try:
             cleaned_q = safe_extract_json(resp.choices[0].message.content.strip())
             all_questions.extend(cleaned_q)
-            
-            # Save progress incrementally
-            with open(output_json_path, "w", encoding="utf-8") as f:
-                json.dump(all_questions, f, ensure_ascii=False, indent=2)
-
-            progress_bar.progress((i + 1) / total_questions)
-
         except Exception as e:
             st.error(f"Error processing question {i+1}: {e}")
-            # Optionally, save the raw LLM output for debugging
-            # with open(f"error_log_{i+1}.txt", "w") as f:
-            #     f.write(resp.choices[0].message.content)
             continue
-    
-    progress_bar.empty() # Clear the progress bar after completion
+
+        # Save progress to JSON file after each question
+        with open(output_json_path, "w", encoding="utf-8") as f:
+            json.dump(all_questions, f, ensure_ascii=False, indent=2)
+
+        st.info(f"✅ Processed question {i+1}/{total_questions}")
+
     st.success(f"All {total_questions} questions processed and saved to {output_json_path}")
     return all_questions
+
 
 
 # --------------------- Streamlit Tabs ---------------------
@@ -212,11 +207,10 @@ with tab2:
         # ✅ Page numbers at bottom
         with col2:
             page_buttons = st.columns(total_pages)
-            for i, col in enumerate(page_buttons):
-                if col.button(str(i+1), key=f"page{i}"):
+            for i in range(total_pages):
+                if page_buttons[i].button(str(i+1), key=f"page{i}"):
                     st.session_state.page = i
                     st.rerun()
-
 
         # ---------------- Submit Section ----------------
         if st.session_state.page == total_pages - 1:
