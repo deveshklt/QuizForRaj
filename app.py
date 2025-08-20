@@ -99,6 +99,13 @@ with tab1:
     st.header("📝 Admin Panel - Create Quiz")
     uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
     uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
+    # ✅ Add download button
+    st.download_button(
+    label="📥 Download Quiz JSON",
+    data=json.dumps(quiz_json, ensure_ascii=False, indent=2),
+    file_name=f"quiz_{quiz_id}.json",
+    mime="application/json"
+)
     quiz_limit = st.number_input("Number of Questions to Extract", min_value=1, max_value=150, value=10)
 
     if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
