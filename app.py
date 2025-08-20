@@ -19,6 +19,9 @@ if not firebase_admin._apps:
 db = firestore.client()
 
 # --------------------- Utilities ---------------------
+def extract_json(llm_output: str):
+    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", llm_output.strip(), flags=re.MULTILINE)
+    return json.loads(cleaned)
 
 def pdf_to_txt(uploaded_pdf) -> str:
     all_text = ""
@@ -34,62 +37,32 @@ def parse_raw_blocks(text: str, limit: int = 150):
     raw_qs = re.split(r"\n?\s*\d+\.\s+", text)
     return raw_qs[1:limit+1]
 
-def safe_extract_json(llm_output: str):
-    """Try to extract valid JSON even if the LLM response is messy."""
-    cleaned = llm_output.strip()
-
-    # Remove code fences
-    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
-
-    # Find JSON array
-    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
-    if not match:
-        raise ValueError("No JSON found in LLM output")
-    json_str = match.group(0)
-
-    # Try normal parse first
-    try:
-        return json.loads(json_str)
-    except json.JSONDecodeError:
-        # Fix common issues
-        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)   # remove trailing commas
-        fixed = re.sub(r"[\x00-\x1f]+", "", fixed)       # remove control chars
-        return json.loads(fixed)
-
-
-def llm_clean_questions_batched(raw_questions, limit=150, batch_size=10):
-    """Process questions in smaller batches for gpt-4o-mini."""
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    all_questions = []
-
-    for i in range(0, min(limit, len(raw_questions)), batch_size):
-        batch = raw_questions[i:i+batch_size]
-        prompt = f"""
-You are a Quiz Formatter.
+def llm_clean_questions(raw_questions, limit=150):
+    prompt = f"""
+You are a {limit} Questions Quiz Formatter.
+Number of Questions should me as much as mentioned. It is very necessary.
 You will be given messy exam questions (Hindi + English) with options. 
-Clean them and output a JSON array of exactly {len(batch)} objects like this:
+There can be a question like which iss to be answered using reaading a paragraph or steps for more then one question.
+Clean them and output a JSON list of objects like this:
 {{
  "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
-Ensure bilingual text if available, options in A/B/C/D/E order, and valid JSON only.
+it is mendotary to create json of {limit} questions.
+Keep bilingual versions if available. 
+Ensure options are in correct A/B/C/D/E order. 
+Only return JSON. 
 Questions:
-{batch}
+{raw_questions}
 """
-
-        resp = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-
-        batch_json = safe_extract_json(resp.choices[0].message.content.strip())
-        all_questions.extend(batch_json)
-
-    return all_questions[:limit]
-
-
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+    resp = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=[{"role":"user","content":prompt}],
+        temperature=0,
+    )
+    return extract_json(resp.choices[0].message.content.strip())
 
 # --------------------- Streamlit Tabs ---------------------
 st.set_page_config(page_title="Quiz Platform", layout="wide")
@@ -106,8 +79,7 @@ with tab1:
         with st.spinner("Processing PDF and generating quiz JSON..."):
             raw_text = pdf_to_txt(uploaded_pdf)
             raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
-            quiz_data = quiz_data = llm_clean_questions_batched(raw_blocks, limit=quiz_limit, batch_size=10)
-
+            quiz_data = llm_clean_questions(raw_blocks, limit=quiz_limit)
 
             # Ensure all quiz fields are strings
             for q in quiz_data:
@@ -184,12 +156,12 @@ with tab2:
 
         # ✅ Page numbers at bottom
         with col2:
-            # Corrected line to fix the error
-            page_buttons = st.columns([1] * total_pages)
+            page_buttons = st.columns(total_pages)
             for i in range(total_pages):
                 if page_buttons[i].button(str(i+1), key=f"page{i}"):
                     st.session_state.page = i
                     st.rerun()
+
         # ---------------- Submit Section ----------------
         if st.session_state.page == total_pages - 1:
             if st.button("Submit Quiz"):
