@@ -52,13 +52,12 @@ Questions:
 {batch}
 """
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4.1",
             messages=[{"role":"user","content":prompt}],
             temperature=0,
         )
         batch_json = extract_json(resp.choices[0].message.content.strip())
         all_cleaned.extend(batch_json)
-
     return all_cleaned[:limit]
 
 # --------------------- Streamlit Tabs ---------------------
