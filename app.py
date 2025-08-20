@@ -40,15 +40,19 @@ def parse_raw_blocks(text: str, limit: int = 150):
 def llm_clean_questions(raw_questions, limit=150):
     prompt = f"""
 You are a Quiz Formatter.
-Format {limit} messy bilingual exam questions into JSON.
-number of question should be strictly {limit}
-Structure:
+
+You will be given messy exam questions (Hindi + English) with options. 
+There can be a question like which iss to be answered using reaading a paragraph or steps for more then one question.
+Clean them and output a JSON list of objects like this:
 {{
  "question_hindi": "...",
  "question_english": "...",
- "options": {{"A":"...","B":"...","C":"...","D":"...", "E":"..."}}
+ "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
-Return only JSON.
+it is mendotary to create json of {limit} questions.
+Keep bilingual versions if available. 
+Ensure options are in correct A/B/C/D/E order. 
+Only return JSON. 
 Questions:
 {raw_questions}
 """
