@@ -142,8 +142,8 @@ with tab2:
                 st.session_state.page += 1
                 if hasattr(st, "rerun"):
                     st.rerun()
-                    else:
-                        st.experimental_rerun()
+                else:
+                    st.experimental_rerun()
 
         if st.session_state.page == total_pages - 1:
             if st.button("Submit Quiz"):
