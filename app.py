@@ -140,7 +140,10 @@ with tab2:
         with col3:
             if st.session_state.page < total_pages - 1 and st.button("Next ➡️"):
                 st.session_state.page += 1
-                st.experimental_rerun()
+                if hasattr(st, "rerun"):
+                    st.rerun()
+                    else:
+                        st.experimental_rerun()
 
         if st.session_state.page == total_pages - 1:
             if st.button("Submit Quiz"):
