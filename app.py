@@ -57,8 +57,8 @@ def safe_extract_json(llm_output: str):
         return json.loads(fixed)
 
 
-def llm_clean_questions_batched(raw_questions, limit=150, batch_size=30):
-    """Process questions in batches to avoid JSON length issues."""
+def llm_clean_questions_batched(raw_questions, limit=150, batch_size=10):
+    """Process questions in smaller batches for gpt-4o-mini."""
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     all_questions = []
 
@@ -83,11 +83,12 @@ Questions:
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
         )
+
         batch_json = safe_extract_json(resp.choices[0].message.content.strip())
         all_questions.extend(batch_json)
 
-    # Ensure exactly `limit` questions
     return all_questions[:limit]
+
 
 # --------------------- Streamlit Tabs ---------------------
 st.set_page_config(page_title="Quiz Platform", layout="wide")
@@ -104,7 +105,7 @@ with tab1:
         with st.spinner("Processing PDF and generating quiz JSON..."):
             raw_text = pdf_to_txt(uploaded_pdf)
             raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
-            quiz_data = quiz_data = llm_clean_questions_batched(raw_blocks, limit=quiz_limit, batch_size=30)
+            quiz_data = quiz_data = llm_clean_questions_batched(raw_blocks, limit=quiz_limit, batch_size=10)
 
 
             # Ensure all quiz fields are strings
