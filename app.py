@@ -9,6 +9,7 @@ import pdfplumber
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, firestore
+import time
 
 # --------------------- Firebase Initialization ---------------------
 # Load Firebase credentials from Streamlit secrets
@@ -18,10 +19,33 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 
-# --------------------- Utilities ---------------------
+# --------------------- Utilities (Updated and Combined) ---------------------
 def extract_json(llm_output: str):
-    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", llm_output.strip(), flags=re.MULTILINE)
-    return json.loads(cleaned)
+    """
+    Tries to extract a valid JSON array from a string,
+    even if the LLM response is messy.
+    """
+    cleaned = llm_output.strip()
+    
+    # Remove code fences if they exist
+    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+    
+    # Find the JSON array
+    match = re.search(r"\[.*\]", cleaned, re.DOTALL)
+    if not match:
+        raise ValueError("No JSON array found in LLM output")
+    
+    json_str = match.group(0)
+    
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError as e:
+        # Simple fix for a common trailing comma issue
+        fixed = re.sub(r",\s*([\]}])", r"\1", json_str)
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            raise ValueError(f"Failed to decode JSON after fixing: {e}")
 
 def pdf_to_txt(uploaded_pdf) -> str:
     all_text = ""
@@ -32,37 +56,108 @@ def pdf_to_txt(uploaded_pdf) -> str:
                 all_text += text + "\n\n"
     return all_text
 
-def parse_raw_blocks(text: str, limit: int = 150):
-    text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n)", "", text, flags=re.I)
-    raw_qs = re.split(r"\n?\s*\d+\.\s+", text)
-    return raw_qs[1:limit+1]
+def parse_raw_blocks(text: str):
+    # Normalize the text by ensuring a newline before each question number
+    normalized_text = re.sub(r'(\d+)\.', r'\n\1.', text).strip()
+    
+    # Split the text into individual questions based on the normalized numbers
+    questions = re.split(r'\n(\d+\.)', normalized_text)
+    
+    # Filter and re-join the questions and their numbers
+    questions_list = []
+    for i in range(1, len(questions), 2):
+        questions_list.append(questions[i] + questions[i+1])
+    
+    return questions_list
 
-def llm_clean_questions(raw_questions, limit=150):
+def llm_clean_questions_streaming(raw_questions: str):
+    """
+    Sends a batch of raw questions to an LLM and streams the response.
+    
+    Args:
+        raw_questions (str): A string containing the messy questions.
+        
+    Yields:
+        str: Chunks of the LLM's response as they are generated.
+    """
     prompt = f"""
-You are a {limit} Questions Quiz Formatter.
-Number of Questions should me as much as mentioned. It is very necessary.
+You are a Quiz Formatter.
 You will be given messy exam questions (Hindi + English) with options. 
-There can be a question like which iss to be answered using reaading a paragraph or steps for more then one question.
 Clean them and output a JSON list of objects like this:
 {{
  "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
-it is mendotary to create json of {limit} questions.
+Create a JSON list of the questions provided.
 Keep bilingual versions if available. 
 Ensure options are in correct A/B/C/D/E order. 
-Only return JSON. 
+Only return JSON. DO NOT use any markdown formatting, code fences, or additional text.
 Questions:
 {raw_questions}
 """
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    resp = client.chat.completions.create(
-        model="gpt-4.1",
+    
+    stream = client.chat.completions.create(
+        model="gpt-4o-mini",
         messages=[{"role":"user","content":prompt}],
         temperature=0,
+        stream=True,
     )
-    return extract_json(resp.choices[0].message.content.strip())
+
+    for chunk in stream:
+        content = chunk.choices[0].delta.content or ""
+        yield content
+
+@st.cache_data
+def process_quiz_batches(full_raw_text, batch_size=10, max_retries=3):
+    """
+    Splits the raw text into batches and processes each with retry logic.
+    This function will be cached to prevent re-runs on UI interactions.
+    """
+    questions_list = parse_raw_blocks(full_raw_text)
+    
+    if len(questions_list) == 0:
+        st.error("Error: No questions were found in the provided text.")
+        return []
+
+    master_list = []
+    total_batches = (len(questions_list) + batch_size - 1) // batch_size
+    
+    progress_bar = st.progress(0, text="Processing batches...")
+    status_text = st.empty()
+
+    for i in range(0, len(questions_list), batch_size):
+        batch_number = i // batch_size + 1
+        retries = 0
+        
+        while retries < max_retries:
+            try:
+                batch = questions_list[i:i + batch_size]
+                batch_text = "\n".join(batch)
+                
+                status_text.info(f"Processing batch {batch_number} of {total_batches} (Attempt {retries + 1}/{max_retries})...")
+                
+                full_response = ""
+                for chunk in llm_clean_questions_streaming(batch_text):
+                    full_response += chunk
+                
+                parsed_data = extract_json(full_response)
+                master_list.extend(parsed_data)
+                
+                progress_bar.progress(batch_number / total_batches)
+                break 
+
+            except Exception as e:
+                retries += 1
+                status_text.warning(f"Error on batch {batch_number}: {e}. Retrying in 5s...")
+                time.sleep(5)
+                if retries == max_retries:
+                    status_text.error(f"Failed to process batch {batch_number} after {max_retries} retries. Skipping.")
+        
+    progress_bar.empty()
+    status_text.success("Batch processing finished.")
+    return master_list
 
 # --------------------- Streamlit Tabs ---------------------
 st.set_page_config(page_title="Quiz Platform", layout="wide")
@@ -73,34 +168,36 @@ with tab1:
     st.header("📝 Admin Panel - Create Quiz")
     uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
     uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
-    quiz_limit = st.number_input("Number of Questions to Extract", min_value=1, max_value=150, value=10)
-
+    batch_size = st.number_input("Questions per Batch", min_value=1, max_value=50, value=10)
+    
     if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
         with st.spinner("Processing PDF and generating quiz JSON..."):
             raw_text = pdf_to_txt(uploaded_pdf)
-            raw_blocks = parse_raw_blocks(raw_text, limit=quiz_limit)
-            quiz_data = llm_clean_questions(raw_blocks, limit=quiz_limit)
+            quiz_data = process_quiz_batches(raw_text, batch_size=batch_size)
 
-            # Ensure all quiz fields are strings
-            for q in quiz_data:
-                q['question_hindi'] = str(q.get('question_hindi', ''))
-                q['question_english'] = str(q.get('question_english', ''))
-                q['options'] = {str(k): str(v) for k,v in q['options'].items()}
+            if quiz_data:
+                # Ensure all quiz fields are strings
+                for q in quiz_data:
+                    q['question_hindi'] = str(q.get('question_hindi', ''))
+                    q['question_english'] = str(q.get('question_english', ''))
+                    q['options'] = {str(k): str(v) for k,v in q['options'].items()}
 
-            # Read answer key CSV into dict with string keys
-            answer_key_df = pd.read_csv(uploaded_csv)
-            answer_key = {str(int(row["qno"])): str(row["answer"]).strip().upper()[:1]
-                          for _, row in answer_key_df.iterrows()}
+                # Read answer key CSV into dict with string keys
+                answer_key_df = pd.read_csv(uploaded_csv)
+                answer_key = {str(int(row["qno"])): str(row["answer"]).strip().upper()[:1]
+                              for _, row in answer_key_df.iterrows()}
 
-            # Save to Firestore
-            quiz_id = str(uuid.uuid4())
-            db.collection("quizzes").document(quiz_id).set({
-                "title": f"Quiz {quiz_id}",
-                "questions": quiz_data,
-                "answer_key": answer_key,
-                "created_at": firestore.SERVER_TIMESTAMP
-            })
-        st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
+                # Save to Firestore
+                quiz_id = str(uuid.uuid4())
+                db.collection("quizzes").document(quiz_id).set({
+                    "title": f"Quiz {quiz_id}",
+                    "questions": quiz_data,
+                    "answer_key": answer_key,
+                    "created_at": firestore.SERVER_TIMESTAMP
+                })
+                st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
+            else:
+                st.error("Failed to process any questions. Please check the PDF format.")
 
 # --------------------- USER PANEL ---------------------
 with tab2:
@@ -116,6 +213,7 @@ with tab2:
             st.session_state.page = 0
             st.session_state.responses = {}
             st.session_state.last_quiz = quiz_selection
+            st.rerun()
 
         quiz_id = [q[0] for q in quizzes_list if q[1] == quiz_selection][0]
 
@@ -139,8 +237,29 @@ with tab2:
             st.markdown(f"**Q{idx}. {q['question_hindi']}**")
             if q.get("question_english"):
                 st.caption(q["question_english"])
-            opts = [f"{k}. {v}" for k, v in q["options"].items()]
-            choice = st.radio(f"Answer for Q{idx}", options=opts, key=f"q{idx}")
+            
+            # Find the selected option letter for the current question
+            selected_option = st.session_state.responses.get(idx, None)
+            
+            # Map options to their display text
+            options_dict = q.get('options', {})
+            display_options = [f"{k}. {v}" for k, v in options_dict.items()]
+            
+            # Find the index of the previously selected option
+            if selected_option:
+                try:
+                    selected_index = display_options.index(selected_option)
+                except ValueError:
+                    selected_index = None # Or handle the case where the option is not found
+            else:
+                selected_index = None
+            
+            choice = st.radio(
+                f"Answer for Q{idx}", 
+                options=display_options, 
+                key=f"q{idx}",
+                index=selected_index
+            )
             st.session_state.responses[idx] = choice
 
         # ---------------- Page Navigation ----------------
@@ -168,8 +287,14 @@ with tab2:
                 data_rows = []
                 correct, wrong, unattempted = 0, 0, 0
 
-                firestore_responses = {str(k): (v[:1].upper() if v else "E")
-                                       for k,v in st.session_state.responses.items()}
+                firestore_responses = {}
+                for q_num, choice_str in st.session_state.responses.items():
+                    if choice_str:
+                        # Extract the letter (A, B, C, D, E) from the full string
+                        letter = choice_str.split('.')[0].strip()
+                        firestore_responses[str(q_num)] = letter.upper()
+                    else:
+                        firestore_responses[str(q_num)] = "E"
 
                 for i in range(1, total+1):
                     sel_letter = firestore_responses.get(str(i),"E")
@@ -193,7 +318,7 @@ with tab2:
                     })
 
                 df = pd.DataFrame(data_rows)
-                marks = (correct*2) - (wrong*(1/3))
+                marks = (correct * 2) - (wrong * (1/3))
                 st.success(f"✅ Correct: {correct} | ❌ Wrong: {wrong} | 💤 Unattempted: {unattempted} | 📊 Total Marks: {marks:.2f}")
                 st.dataframe(df, use_container_width=True)
 
