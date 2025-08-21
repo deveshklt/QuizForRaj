@@ -57,42 +57,50 @@ def pdf_to_txt(uploaded_pdf) -> str:
     return all_text
 
 def parse_raw_blocks(text: str):
-    # Normalize the text by ensuring a newline before each question number
-    normalized_text = re.sub(r'(\d+)\.', r'\n\1.', text).strip()
+    """
+    Improved function to split text into blocks.
+    Handles various numbering formats and removes headers/footers.
+    """
+    # Remove common headers/footers
+    text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n|\s*SPZ\d+\s+\d+\s*\n)", "", text, flags=re.I)
+    
+    # Normalize numbering to ensure a newline before each question number
+    normalized_text = re.sub(r'\s*(\d+)\.\s*', r'\n\1. ', text).strip()
     
     # Split the text into individual questions based on the normalized numbers
-    questions = re.split(r'\n(\d+\.)', normalized_text)
+    questions = re.split(r'\n(\d+\.\s+)', normalized_text)
     
-    # Filter and re-join the questions and their numbers
+    # Filter out empty strings and re-join question numbers with their text
     questions_list = []
-    for i in range(1, len(questions), 2):
-        questions_list.append(questions[i] + questions[i+1])
+    if questions and len(questions) > 1:
+        for i in range(1, len(questions), 2):
+            questions_list.append(questions[i] + (questions[i+1] if i+1 < len(questions) else ''))
     
     return questions_list
 
 def llm_clean_questions_streaming(raw_questions: str):
     """
     Sends a batch of raw questions to an LLM and streams the response.
-    
-    Args:
-        raw_questions (str): A string containing the messy questions.
-        
-    Yields:
-        str: Chunks of the LLM's response as they are generated.
+    The prompt is refined to reduce hallucinations and request null for bad data.
     """
     prompt = f"""
 You are a Quiz Formatter.
 You will be given messy exam questions (Hindi + English) with options. 
-Clean them and output a JSON list of objects like this:
+Clean them and output a JSON list of objects. For any content you cannot confidently extract, use `null`. Do not make up information.
+
+The JSON format must be:
 {{
  "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
+
 Create a JSON list of the questions provided.
-Keep bilingual versions if available. 
-Ensure options are in correct A/B/C/D/E order. 
-Only return JSON. DO NOT use any markdown formatting, code fences, or additional text.
+Keep both bilingual versions if available. 
+Ensure options are in the correct A/B/C/D/E order as provided.
+Only return the JSON list. Do NOT use any markdown formatting, code fences, or additional text.
+If a question or an option is missing or malformed, set its value to null.
+
 Questions:
 {raw_questions}
 """
@@ -176,6 +184,17 @@ with tab1:
             quiz_data = process_quiz_batches(raw_text, batch_size=batch_size)
 
             if quiz_data:
+                # Post-processing and logging of potential issues
+                st.subheader("Post-Processing Report")
+                
+                for i, q in enumerate(quiz_data, 1):
+                    # Check for null values indicating parsing issues
+                    if not q['question_hindi'] or not q['question_english']:
+                        st.warning(f"⚠️ Question {i} might be incomplete. Original block: {questions_list[i-1]}")
+                    for k, v in q['options'].items():
+                        if not v:
+                            st.warning(f"⚠️ Option '{k}' for Question {i} is empty.")
+                
                 # Ensure all quiz fields are strings
                 for q in quiz_data:
                     q['question_hindi'] = str(q.get('question_hindi', ''))
@@ -243,7 +262,7 @@ with tab2:
             
             # Map options to their display text
             options_dict = q.get('options', {})
-            display_options = [f"{k}. {v}" for k, v in options_dict.items()]
+            display_options = [f"{k}. {v}" for k, v in options_dict.items() if v] # Filter out null options
             
             # Find the index of the previously selected option
             if selected_option:
