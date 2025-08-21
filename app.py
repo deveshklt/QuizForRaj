@@ -85,16 +85,18 @@ def llm_clean_questions_streaming(raw_questions: str):
     """
     prompt = f"""
 You are a Quiz Formatter.
-You will be given messy exam questions in English with options. 
+You will be given messy exam questions (Hindi + English) with options. 
 Clean them and output a JSON list of objects. For any content you cannot confidently extract, use `null`. Do not make up information.
 
 The JSON format must be:
 {{
+ "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
 
 Create a JSON list of the questions provided.
+Keep both bilingual versions if available. 
 Ensure options are in the correct A/B/C/D/E order as provided.
 Only return the JSON list. Do NOT use any markdown formatting, code fences, or additional text.
 If a question or an option is missing or malformed, set its value to null.
@@ -187,14 +189,15 @@ with tab1:
                 
                 for i, q in enumerate(quiz_data, 1):
                     # Check for null values indicating parsing issues
-                    if not q.get('question_english'):
-                        st.warning(f"⚠️ Question {i} might be incomplete. Original block: {parse_raw_blocks(raw_text)[i-1]}")
+                    if not q['question_hindi'] or not q['question_english']:
+                        st.warning(f"⚠️ Question {i} might be incomplete. Original block: {questions_list[i-1]}")
                     for k, v in q['options'].items():
                         if not v:
                             st.warning(f"⚠️ Option '{k}' for Question {i} is empty.")
                 
                 # Ensure all quiz fields are strings
                 for q in quiz_data:
+                    q['question_hindi'] = str(q.get('question_hindi', ''))
                     q['question_english'] = str(q.get('question_english', ''))
                     q['options'] = {str(k): str(v) for k,v in q['options'].items()}
 
@@ -250,7 +253,9 @@ with tab2:
         current_questions = quiz_data[start:end]
 
         for idx, q in enumerate(current_questions, start=start+1):
-            st.markdown(f"**Q{idx}. {q['question_english']}**")
+            st.markdown(f"**Q{idx}. {q['question_hindi']}**")
+            if q.get("question_english"):
+                st.caption(q["question_english"])
             
             # Find the selected option letter for the current question
             selected_option = st.session_state.responses.get(idx, None)
