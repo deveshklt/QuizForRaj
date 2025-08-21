@@ -3,3 +3,4 @@ openai
 pandas
 pdfplumber
 firebase-admin
+unstructured
