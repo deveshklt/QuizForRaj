@@ -3,4 +3,4 @@ openai
 pandas
 pdfplumber
 firebase-admin
-unstructured
+unstructured[local-inference]
