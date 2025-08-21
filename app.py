@@ -5,11 +5,12 @@ import json
 import uuid
 import pandas as pd
 import streamlit as st
-import pdfplumber
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, firestore
 import time
+import tempfile
+from unstructured.partition.auto import partition
 
 # --------------------- Firebase Initialization ---------------------
 # Load Firebase credentials from Streamlit secrets
@@ -48,12 +49,35 @@ def extract_json(llm_output: str):
             raise ValueError(f"Failed to decode JSON after fixing: {e}")
 
 def pdf_to_txt(uploaded_pdf) -> str:
+    """
+    Extracts text from a PDF file using the Unstructured library,
+    handling complex layouts and focusing on English content.
+    """
     all_text = ""
-    with pdfplumber.open(uploaded_pdf) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                all_text += text + "\n\n"
+    try:
+        # Save the uploaded file to a temporary location
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_pdf.getvalue())
+            tmp_path = tmp_file.name
+
+        # Use Unstructured to partition the PDF and extract text
+        elements = partition(filename=tmp_path,
+                             include_page_breaks=True,
+                             strategy="hi_res",
+                             languages=["eng"]) # Focus on English language extraction
+
+        # Concatenate text from all elements
+        for element in elements:
+            if hasattr(element, 'text'):
+                all_text += element.text + "\n\n"
+        
+        # Clean up the temporary file
+        os.remove(tmp_path)
+    
+    except Exception as e:
+        st.error(f"Error during PDF text extraction: {e}")
+        return ""
+        
     return all_text
 
 def parse_raw_blocks(text: str):
@@ -85,18 +109,17 @@ def llm_clean_questions_streaming(raw_questions: str):
     """
     prompt = f"""
 You are a Quiz Formatter.
-You will be given messy exam questions (Hindi + English) with options. 
+You will be given exam questions with options.
+Extract the questions and options in English only. Ignore any other languages.
 Clean them and output a JSON list of objects. For any content you cannot confidently extract, use `null`. Do not make up information.
 
 The JSON format must be:
 {{
- "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
 
 Create a JSON list of the questions provided.
-Keep both bilingual versions if available. 
 Ensure options are in the correct A/B/C/D/E order as provided.
 Only return the JSON list. Do NOT use any markdown formatting, code fences, or additional text.
 If a question or an option is missing or malformed, set its value to null.
@@ -187,17 +210,15 @@ with tab1:
                 # Post-processing and logging of potential issues
                 st.subheader("Post-Processing Report")
                 
+                # Check for null values to see if the LLM struggled
                 for i, q in enumerate(quiz_data, 1):
-                    # Check for null values indicating parsing issues
-                    if not q['question_hindi'] or not q['question_english']:
-                        st.warning(f"⚠️ Question {i} might be incomplete. Original block: {questions_list[i-1]}")
-                    for k, v in q['options'].items():
-                        if not v:
-                            st.warning(f"⚠️ Option '{k}' for Question {i} is empty.")
-                
+                    if not q['question_english']:
+                         st.warning(f"⚠️ Question {i} has a missing question title.")
+                    if not all(q.get('options', {}).values()):
+                         st.warning(f"⚠️ Question {i} has one or more missing options.")
+
                 # Ensure all quiz fields are strings
                 for q in quiz_data:
-                    q['question_hindi'] = str(q.get('question_hindi', ''))
                     q['question_english'] = str(q.get('question_english', ''))
                     q['options'] = {str(k): str(v) for k,v in q['options'].items()}
 
@@ -253,9 +274,7 @@ with tab2:
         current_questions = quiz_data[start:end]
 
         for idx, q in enumerate(current_questions, start=start+1):
-            st.markdown(f"**Q{idx}. {q['question_hindi']}**")
-            if q.get("question_english"):
-                st.caption(q["question_english"])
+            st.markdown(f"**Q{idx}. {q['question_english']}**")
             
             # Find the selected option letter for the current question
             selected_option = st.session_state.responses.get(idx, None)
@@ -269,7 +288,7 @@ with tab2:
                 try:
                     selected_index = display_options.index(selected_option)
                 except ValueError:
-                    selected_index = None # Or handle the case where the option is not found
+                    selected_index = None
             else:
                 selected_index = None
             
