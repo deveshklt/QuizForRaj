@@ -90,13 +90,11 @@ Clean them and output a JSON list of objects. For any content you cannot confide
 
 The JSON format must be:
 {{
- "question_hindi": "...",
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
 
-Create a JSON list of the questions provided.
-Keep both bilingual versions if available. 
+Creat only english versions if available. 
 Ensure options are in the correct A/B/C/D/E order as provided.
 Only return the JSON list. Do NOT use any markdown formatting, code fences, or additional text.
 If a question or an option is missing or malformed, set its value to null.
