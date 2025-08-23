@@ -1,73 +1,75 @@
-# quiz_firestore_app_final.py
-import os
-import re
-import json
-import uuid
+# --------------------- Imports ---------------------
+import os, re, json, uuid, time
 import pandas as pd
 import streamlit as st
 import pdfplumber
 from openai import OpenAI
 import firebase_admin
 from firebase_admin import credentials, firestore
-import time
 
-# --------------------- Firebase Initialization ---------------------
+# --------------------- Firebase ---------------------
 if not firebase_admin._apps:
     cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
-
 db = firestore.client()
 
-# --------------------- Utilities ---------------------
+# --------------------- PDF Utilities ---------------------
+def pdf_to_txt(uploaded_pdf) -> str:
+    all_text = []
+    with pdfplumber.open(uploaded_pdf) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                all_text.append(text)
+    return "\n\n".join(all_text)
+
+def split_question_and_options(question_block: str):
+    options = {"A": None, "B": None, "C": None, "D": None, "E": None}
+    parts = re.split(r'([A-E][\).])', question_block)
+    q_text = parts[0].strip()
+    for i in range(1, len(parts)-1, 2):
+        label = parts[i][0]
+        option_text = parts[i+1].strip()
+        options[label] = option_text if option_text else None
+    return q_text, options
+
+def parse_raw_blocks_structured(text: str):
+    text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n|\s*SPZ\d+\s+\d+\s*\n|\f)", "", text, flags=re.I)
+    normalized_text = re.sub(r'\s*(\d+)\.\s*', r'\n\1. ', text).strip()
+    raw_questions = [q.strip() for q in re.split(r'(?:\n\d+\.\s+)', normalized_text) if q.strip()]
+    structured_questions = []
+    for q in raw_questions:
+        q_text, options = split_question_and_options(q)
+        structured_questions.append({"question": q_text, "options": options})
+    return structured_questions
+
+# --------------------- LLM Utilities ---------------------
 def extract_json(llm_output: str):
-    cleaned = llm_output.strip()
-    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
+    cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", llm_output.strip(), flags=re.MULTILINE).strip()
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if not match:
         raise ValueError("No JSON array found in LLM output")
     json_str = match.group(0)
     try:
         return json.loads(json_str)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         fixed = re.sub(r",\s*([\]}])", r"\1", json_str)
         return json.loads(fixed)
 
-def pdf_to_txt(uploaded_pdf) -> str:
-    all_text = ""
-    with pdfplumber.open(uploaded_pdf) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                all_text += text + "\n\n"
-    return all_text
-
-def parse_raw_blocks(text: str):
-    text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n|\s*SPZ\d+\s+\d+\s*\n)", "", text, flags=re.I)
-    normalized_text = re.sub(r'\s*(\d+)\.\s*', r'\n\1. ', text).strip()
-    questions = re.split(r'\n(\d+\.\s+)', normalized_text)
-    questions_list = []
-    if questions and len(questions) > 1:
-        for i in range(1, len(questions), 2):
-            questions_list.append(questions[i] + (questions[i+1] if i+1 < len(questions) else ''))
-    return questions_list
-
-def llm_clean_questions_streaming(raw_questions: str):
+def llm_clean_questions_streaming(batch_json: str):
     prompt = f"""
 You are a Quiz Formatter.
-You will be given messy exam questions (English + maybe some Hindi). 
-Extract only the **English** part and format as JSON.
+You will be given structured quiz questions with options (some may be missing or messy). 
+Return only **English parts** and fill missing options with null.
 
-The JSON format must be:
+Return a JSON list like:
 {{
  "question_english": "...",
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
 
-If a question or option is missing, set its value to null.
-Return only the JSON list, no extra text.
-
-Questions:
-{raw_questions}
+Batch:
+{batch_json}
 """
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
     stream = client.chat.completions.create(
@@ -77,15 +79,16 @@ Questions:
         stream=True,
     )
     for chunk in stream:
-        content = chunk.choices[0].delta.content or ""
-        yield content
+        yield chunk.choices[0].delta.content or ""
 
+# --------------------- Batch Processing ---------------------
 @st.cache_data
-def process_quiz_batches(full_raw_text, batch_size=10, max_retries=3):
-    questions_list = parse_raw_blocks(full_raw_text)
-    if len(questions_list) == 0:
+def process_quiz_batches_structured(full_raw_text, batch_size=10, max_retries=3):
+    questions_list = parse_raw_blocks_structured(full_raw_text)
+    if not questions_list:
         st.error("Error: No questions found in the PDF.")
         return []
+    
     master_list = []
     total_batches = (len(questions_list) + batch_size - 1) // batch_size
     progress_bar = st.progress(0, text="Processing batches...")
@@ -97,7 +100,9 @@ def process_quiz_batches(full_raw_text, batch_size=10, max_retries=3):
         while retries < max_retries:
             try:
                 batch = questions_list[i:i + batch_size]
-                batch_text = "\n".join(batch)
+                batch_payload = [{"question": q["question"], "options": q["options"]} for q in batch]
+                batch_text = json.dumps(batch_payload, ensure_ascii=False, indent=2)
+
                 status_text.info(f"Processing batch {batch_number}/{total_batches} (Attempt {retries+1})...")
                 full_response = ""
                 for chunk in llm_clean_questions_streaming(batch_text):
@@ -112,151 +117,48 @@ def process_quiz_batches(full_raw_text, batch_size=10, max_retries=3):
                 time.sleep(5)
                 if retries == max_retries:
                     status_text.error(f"Failed batch {batch_number}. Skipping.")
+    
     progress_bar.empty()
     status_text.success("Batch processing finished.")
     return master_list
 
-# --------------------- Streamlit Tabs ---------------------
+# --------------------- Streamlit Admin ---------------------
 st.set_page_config(page_title="Quiz Platform", layout="wide")
-tab1, tab2 = st.tabs(["Admin Panel", "Take Quiz"])
+st.header("📝 Admin Panel - Create Quiz")
+uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
+uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
+batch_size = st.number_input("Questions per Batch", min_value=1, max_value=50, value=10)
 
-# --------------------- ADMIN PANEL ---------------------
-with tab1:
-    st.header("📝 Admin Panel - Create Quiz")
-    uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
-    uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
-    batch_size = st.number_input("Questions per Batch", min_value=1, max_value=50, value=10)
-    
-    if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
-        with st.spinner("Processing PDF and generating quiz JSON..."):
-            raw_text = pdf_to_txt(uploaded_pdf)
-            quiz_data = process_quiz_batches(raw_text, batch_size=batch_size)
+if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
+    with st.spinner("Processing PDF and generating quiz JSON..."):
+        raw_text = pdf_to_txt(uploaded_pdf)
+        quiz_data = process_quiz_batches_structured(raw_text, batch_size=batch_size)
 
-            if quiz_data:
-                st.subheader("Post-Processing Report")
-                for i, q in enumerate(quiz_data, 1):
-                    if not q['question_english']:
-                        st.warning(f"⚠️ Question {i} might be incomplete.")
-                    for k, v in q['options'].items():
-                        if not v:
-                            st.warning(f"⚠️ Option '{k}' for Question {i} is empty.")
-                for q in quiz_data:
-                    q['question_english'] = str(q.get('question_english', ''))
-                    q['options'] = {str(k): str(v) for k,v in q['options'].items()}
-                answer_key_df = pd.read_csv(uploaded_csv)
-                answer_key = {str(int(row["qno"])): str(row["answer"]).strip().upper()[:1]
-                              for _, row in answer_key_df.iterrows()}
-                quiz_id = str(uuid.uuid4())
-                db.collection("quizzes").document(quiz_id).set({
-                    "title": f"Quiz {quiz_id}",
-                    "questions": quiz_data,
-                    "answer_key": answer_key,
-                    "created_at": firestore.SERVER_TIMESTAMP
-                })
-                st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
-            else:
-                st.error("Failed to process any questions. Please check the PDF format.")
+        if quiz_data:
+            st.subheader("Post-Processing Report")
+            for i, q in enumerate(quiz_data, 1):
+                if not q['question_english']:
+                    st.warning(f"⚠️ Question {i} might be incomplete.")
+                for k, v in q['options'].items():
+                    if not v:
+                        st.warning(f"⚠️ Option '{k}' for Question {i} is empty.")
 
-# --------------------- USER PANEL ---------------------
-with tab2:
-    st.header("🖊️ Take Quiz")
-    quiz_docs = db.collection("quizzes").order_by("created_at", direction=firestore.Query.DESCENDING).stream()
-    quizzes_list = [(doc.id, doc.to_dict().get("title")) for doc in quiz_docs]
+            for q in quiz_data:
+                q['question_english'] = str(q.get('question_english', ''))
+                q['options'] = {str(k): str(v) if v else None for k,v in q['options'].items()}
 
-    if quizzes_list:
-        quiz_selection = st.selectbox("Select a Quiz", options=[q[1] for q in quizzes_list])
-        if "last_quiz" not in st.session_state or st.session_state.last_quiz != quiz_selection:
-            st.session_state.page = 0
-            st.session_state.responses = {}
-            st.session_state.last_quiz = quiz_selection
-            st.rerun()
+            # Read answer key
+            answer_key_df = pd.read_csv(uploaded_csv)
+            answer_key = {str(int(row["qno"])): str(row["answer"]).strip().upper()[:1]
+                          for _, row in answer_key_df.iterrows()}
 
-        quiz_id = [q[0] for q in quizzes_list if q[1] == quiz_selection][0]
-        quiz_doc = db.collection("quizzes").document(quiz_id).get().to_dict()
-        quiz_data = quiz_doc["questions"]
-        answer_key = quiz_doc["answer_key"]
-
-        if "responses" not in st.session_state:
-            st.session_state.responses = {}
-        if "page" not in st.session_state:
-            st.session_state.page = 0
-
-        per_page = 5
-        total = len(quiz_data)
-        total_pages = (total - 1) // per_page + 1
-        start = st.session_state.page * per_page
-        end = start + per_page
-        current_questions = quiz_data[start:end]
-
-        for idx, q in enumerate(current_questions, start=start+1):
-            st.markdown(f"**Q{idx}. {q['question_english']}**")
-            options_dict = q.get('options', {})
-            display_options = [f"{k}. {v}" for k, v in options_dict.items() if v]
-            selected_option = st.session_state.responses.get(idx, None)
-            selected_index = display_options.index(selected_option) if selected_option in display_options else None
-            choice = st.radio(
-                f"Answer for Q{idx}", 
-                options=display_options, 
-                key=f"q{idx}",
-                index=selected_index
-            )
-            st.session_state.responses[idx] = choice
-
-        col1, col2, col3 = st.columns([1, 6, 1])
-        with col1:
-            if st.session_state.page > 0 and st.button("⬅️ Previous"):
-                st.session_state.page -= 1
-                st.rerun()
-        with col3:
-            if st.session_state.page < total_pages - 1 and st.button("Next ➡️"):
-                st.session_state.page += 1
-                st.rerun()
-        with col2:
-            page_buttons = st.columns(total_pages)
-            for i in range(total_pages):
-                if page_buttons[i].button(str(i+1), key=f"page{i}"):
-                    st.session_state.page = i
-                    st.rerun()
-
-        if st.session_state.page == total_pages - 1:
-            if st.button("Submit Quiz"):
-                data_rows, correct, wrong, unattempted = [], 0, 0, 0
-                firestore_responses = {}
-                for q_num, choice_str in st.session_state.responses.items():
-                    if choice_str:
-                        letter = choice_str.split('.')[0].strip()
-                        firestore_responses[str(q_num)] = letter.upper()
-                    else:
-                        firestore_responses[str(q_num)] = "E"
-                for i in range(1, total+1):
-                    sel_letter = firestore_responses.get(str(i),"E")
-                    key_letter = answer_key.get(str(i),"")
-                    if sel_letter == "E":
-                        unattempted += 1
-                        result = "–"
-                    elif sel_letter == key_letter:
-                        correct += 1
-                        result = "✔"
-                    else:
-                        wrong += 1
-                        result = "✘"
-                    data_rows.append({
-                        "Q#": i,
-                        "Selected": sel_letter,
-                        "Key": key_letter,
-                        "Result": result
-                    })
-                df = pd.DataFrame(data_rows)
-                marks = (correct * 2) - (wrong * (1/3))
-                st.success(f"✅ Correct: {correct} | ❌ Wrong: {wrong} | 💤 Unattempted: {unattempted} | 📊 Total Marks: {marks:.2f}")
-                st.dataframe(df, use_container_width=True)
-                user_id = str(uuid.uuid4())
-                db.collection("responses").document(f"{quiz_id}_{user_id}").set({
-                    "quiz_id": str(quiz_id),
-                    "user_id": str(user_id),
-                    "responses": firestore_responses,
-                    "submitted_at": firestore.SERVER_TIMESTAMP
-                })
-                st.info("Responses saved successfully.")
-    else:
-        st.info("No quizzes available yet. Admin needs to create one.")
+            quiz_id = str(uuid.uuid4())
+            db.collection("quizzes").document(quiz_id).set({
+                "title": f"Quiz {quiz_id}",
+                "questions": quiz_data,
+                "answer_key": answer_key,
+                "created_at": firestore.SERVER_TIMESTAMP
+            })
+            st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
+        else:
+            st.error("Failed to process any questions. Please check the PDF format.")
