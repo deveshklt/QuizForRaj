@@ -12,40 +12,25 @@ from firebase_admin import credentials, firestore
 import time
 
 # --------------------- Firebase Initialization ---------------------
-# Load Firebase credentials from Streamlit secrets
 if not firebase_admin._apps:
     cred = credentials.Certificate(dict(st.secrets["firebase"]))
     firebase_admin.initialize_app(cred)
 
 db = firestore.client()
 
-# --------------------- Utilities (Updated and Combined) ---------------------
+# --------------------- Utilities ---------------------
 def extract_json(llm_output: str):
-    """
-    Tries to extract a valid JSON array from a string,
-    even if the LLM response is messy.
-    """
     cleaned = llm_output.strip()
-    
-    # Remove code fences if they exist
     cleaned = re.sub(r"^```(json)?\s*|\s*```$", "", cleaned, flags=re.MULTILINE).strip()
-    
-    # Find the JSON array
     match = re.search(r"\[.*\]", cleaned, re.DOTALL)
     if not match:
         raise ValueError("No JSON array found in LLM output")
-    
     json_str = match.group(0)
-    
     try:
         return json.loads(json_str)
     except json.JSONDecodeError as e:
-        # Simple fix for a common trailing comma issue
         fixed = re.sub(r",\s*([\]}])", r"\1", json_str)
-        try:
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            raise ValueError(f"Failed to decode JSON after fixing: {e}")
+        return json.loads(fixed)
 
 def pdf_to_txt(uploaded_pdf) -> str:
     all_text = ""
@@ -57,36 +42,20 @@ def pdf_to_txt(uploaded_pdf) -> str:
     return all_text
 
 def parse_raw_blocks(text: str):
-    """
-    Improved function to split text into blocks.
-    Handles various numbering formats and removes headers/footers.
-    """
-    # Remove common headers/footers
     text = re.sub(r"(P\.T\.O\.|---.*?---|.*?\n|\s*SPZ\d+\s+\d+\s*\n)", "", text, flags=re.I)
-    
-    # Normalize numbering to ensure a newline before each question number
     normalized_text = re.sub(r'\s*(\d+)\.\s*', r'\n\1. ', text).strip()
-    
-    # Split the text into individual questions based on the normalized numbers
     questions = re.split(r'\n(\d+\.\s+)', normalized_text)
-    
-    # Filter out empty strings and re-join question numbers with their text
     questions_list = []
     if questions and len(questions) > 1:
         for i in range(1, len(questions), 2):
             questions_list.append(questions[i] + (questions[i+1] if i+1 < len(questions) else ''))
-    
     return questions_list
 
 def llm_clean_questions_streaming(raw_questions: str):
-    """
-    Sends a batch of raw questions to an LLM and streams the response.
-    The prompt is refined to reduce hallucinations and request null for bad data.
-    """
     prompt = f"""
 You are a Quiz Formatter.
-You will be given messy exam questions (Hindi + English) with options. 
-Clean them and output a JSON list of objects. For any content you cannot confidently extract, use `null`. Do not make up information.
+You will be given messy exam questions (English + maybe some Hindi). 
+Extract only the **English** part and format as JSON.
 
 The JSON format must be:
 {{
@@ -94,73 +63,55 @@ The JSON format must be:
  "options": {{"A": "...", "B": "...", "C": "...", "D": "...", "E": "..."}}
 }}
 
-Creat only english versions if available. 
-Ensure options are in the correct A/B/C/D/E order as provided.
-Only return the JSON list. Do NOT use any markdown formatting, code fences, or additional text.
-If a question or an option is missing or malformed, set its value to null.
+If a question or option is missing, set its value to null.
+Return only the JSON list, no extra text.
 
 Questions:
 {raw_questions}
 """
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-    
     stream = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{"role":"user","content":prompt}],
         temperature=0,
         stream=True,
     )
-
     for chunk in stream:
         content = chunk.choices[0].delta.content or ""
         yield content
 
 @st.cache_data
 def process_quiz_batches(full_raw_text, batch_size=10, max_retries=3):
-    """
-    Splits the raw text into batches and processes each with retry logic.
-    This function will be cached to prevent re-runs on UI interactions.
-    """
     questions_list = parse_raw_blocks(full_raw_text)
-    
     if len(questions_list) == 0:
-        st.error("Error: No questions were found in the provided text.")
+        st.error("Error: No questions found in the PDF.")
         return []
-
     master_list = []
     total_batches = (len(questions_list) + batch_size - 1) // batch_size
-    
     progress_bar = st.progress(0, text="Processing batches...")
     status_text = st.empty()
 
     for i in range(0, len(questions_list), batch_size):
         batch_number = i // batch_size + 1
         retries = 0
-        
         while retries < max_retries:
             try:
                 batch = questions_list[i:i + batch_size]
                 batch_text = "\n".join(batch)
-                
-                status_text.info(f"Processing batch {batch_number} of {total_batches} (Attempt {retries + 1}/{max_retries})...")
-                
+                status_text.info(f"Processing batch {batch_number}/{total_batches} (Attempt {retries+1})...")
                 full_response = ""
                 for chunk in llm_clean_questions_streaming(batch_text):
                     full_response += chunk
-                
                 parsed_data = extract_json(full_response)
                 master_list.extend(parsed_data)
-                
                 progress_bar.progress(batch_number / total_batches)
-                break 
-
+                break
             except Exception as e:
                 retries += 1
                 status_text.warning(f"Error on batch {batch_number}: {e}. Retrying in 5s...")
                 time.sleep(5)
                 if retries == max_retries:
-                    status_text.error(f"Failed to process batch {batch_number} after {max_retries} retries. Skipping.")
-        
+                    status_text.error(f"Failed batch {batch_number}. Skipping.")
     progress_bar.empty()
     status_text.success("Batch processing finished.")
     return master_list
@@ -169,5 +120,143 @@ def process_quiz_batches(full_raw_text, batch_size=10, max_retries=3):
 st.set_page_config(page_title="Quiz Platform", layout="wide")
 tab1, tab2 = st.tabs(["Admin Panel", "Take Quiz"])
 
-st.set_page_config(page_title="Quiz Platform", layout="wide")
-tab1, tab2 = st.tabs(["Admin Panel", "Take Quiz"])
+# --------------------- ADMIN PANEL ---------------------
+with tab1:
+    st.header("📝 Admin Panel - Create Quiz")
+    uploaded_pdf = st.file_uploader("Upload Quiz PDF", type=["pdf"])
+    uploaded_csv = st.file_uploader("Upload Answer Key CSV", type=["csv"])
+    batch_size = st.number_input("Questions per Batch", min_value=1, max_value=50, value=10)
+    
+    if st.button("Create Quiz") and uploaded_pdf and uploaded_csv:
+        with st.spinner("Processing PDF and generating quiz JSON..."):
+            raw_text = pdf_to_txt(uploaded_pdf)
+            quiz_data = process_quiz_batches(raw_text, batch_size=batch_size)
+
+            if quiz_data:
+                st.subheader("Post-Processing Report")
+                for i, q in enumerate(quiz_data, 1):
+                    if not q['question_english']:
+                        st.warning(f"⚠️ Question {i} might be incomplete.")
+                    for k, v in q['options'].items():
+                        if not v:
+                            st.warning(f"⚠️ Option '{k}' for Question {i} is empty.")
+                for q in quiz_data:
+                    q['question_english'] = str(q.get('question_english', ''))
+                    q['options'] = {str(k): str(v) for k,v in q['options'].items()}
+                answer_key_df = pd.read_csv(uploaded_csv)
+                answer_key = {str(int(row["qno"])): str(row["answer"]).strip().upper()[:1]
+                              for _, row in answer_key_df.iterrows()}
+                quiz_id = str(uuid.uuid4())
+                db.collection("quizzes").document(quiz_id).set({
+                    "title": f"Quiz {quiz_id}",
+                    "questions": quiz_data,
+                    "answer_key": answer_key,
+                    "created_at": firestore.SERVER_TIMESTAMP
+                })
+                st.success(f"✅ Quiz created successfully with ID: {quiz_id}")
+            else:
+                st.error("Failed to process any questions. Please check the PDF format.")
+
+# --------------------- USER PANEL ---------------------
+with tab2:
+    st.header("🖊️ Take Quiz")
+    quiz_docs = db.collection("quizzes").order_by("created_at", direction=firestore.Query.DESCENDING).stream()
+    quizzes_list = [(doc.id, doc.to_dict().get("title")) for doc in quiz_docs]
+
+    if quizzes_list:
+        quiz_selection = st.selectbox("Select a Quiz", options=[q[1] for q in quizzes_list])
+        if "last_quiz" not in st.session_state or st.session_state.last_quiz != quiz_selection:
+            st.session_state.page = 0
+            st.session_state.responses = {}
+            st.session_state.last_quiz = quiz_selection
+            st.rerun()
+
+        quiz_id = [q[0] for q in quizzes_list if q[1] == quiz_selection][0]
+        quiz_doc = db.collection("quizzes").document(quiz_id).get().to_dict()
+        quiz_data = quiz_doc["questions"]
+        answer_key = quiz_doc["answer_key"]
+
+        if "responses" not in st.session_state:
+            st.session_state.responses = {}
+        if "page" not in st.session_state:
+            st.session_state.page = 0
+
+        per_page = 5
+        total = len(quiz_data)
+        total_pages = (total - 1) // per_page + 1
+        start = st.session_state.page * per_page
+        end = start + per_page
+        current_questions = quiz_data[start:end]
+
+        for idx, q in enumerate(current_questions, start=start+1):
+            st.markdown(f"**Q{idx}. {q['question_english']}**")
+            options_dict = q.get('options', {})
+            display_options = [f"{k}. {v}" for k, v in options_dict.items() if v]
+            selected_option = st.session_state.responses.get(idx, None)
+            selected_index = display_options.index(selected_option) if selected_option in display_options else None
+            choice = st.radio(
+                f"Answer for Q{idx}", 
+                options=display_options, 
+                key=f"q{idx}",
+                index=selected_index
+            )
+            st.session_state.responses[idx] = choice
+
+        col1, col2, col3 = st.columns([1, 6, 1])
+        with col1:
+            if st.session_state.page > 0 and st.button("⬅️ Previous"):
+                st.session_state.page -= 1
+                st.rerun()
+        with col3:
+            if st.session_state.page < total_pages - 1 and st.button("Next ➡️"):
+                st.session_state.page += 1
+                st.rerun()
+        with col2:
+            page_buttons = st.columns(total_pages)
+            for i in range(total_pages):
+                if page_buttons[i].button(str(i+1), key=f"page{i}"):
+                    st.session_state.page = i
+                    st.rerun()
+
+        if st.session_state.page == total_pages - 1:
+            if st.button("Submit Quiz"):
+                data_rows, correct, wrong, unattempted = [], 0, 0, 0
+                firestore_responses = {}
+                for q_num, choice_str in st.session_state.responses.items():
+                    if choice_str:
+                        letter = choice_str.split('.')[0].strip()
+                        firestore_responses[str(q_num)] = letter.upper()
+                    else:
+                        firestore_responses[str(q_num)] = "E"
+                for i in range(1, total+1):
+                    sel_letter = firestore_responses.get(str(i),"E")
+                    key_letter = answer_key.get(str(i),"")
+                    if sel_letter == "E":
+                        unattempted += 1
+                        result = "–"
+                    elif sel_letter == key_letter:
+                        correct += 1
+                        result = "✔"
+                    else:
+                        wrong += 1
+                        result = "✘"
+                    data_rows.append({
+                        "Q#": i,
+                        "Selected": sel_letter,
+                        "Key": key_letter,
+                        "Result": result
+                    })
+                df = pd.DataFrame(data_rows)
+                marks = (correct * 2) - (wrong * (1/3))
+                st.success(f"✅ Correct: {correct} | ❌ Wrong: {wrong} | 💤 Unattempted: {unattempted} | 📊 Total Marks: {marks:.2f}")
+                st.dataframe(df, use_container_width=True)
+                user_id = str(uuid.uuid4())
+                db.collection("responses").document(f"{quiz_id}_{user_id}").set({
+                    "quiz_id": str(quiz_id),
+                    "user_id": str(user_id),
+                    "responses": firestore_responses,
+                    "submitted_at": firestore.SERVER_TIMESTAMP
+                })
+                st.info("Responses saved successfully.")
+    else:
+        st.info("No quizzes available yet. Admin needs to create one.")
